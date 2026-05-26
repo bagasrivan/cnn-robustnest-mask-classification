@@ -7,53 +7,37 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (
-    Dense,
-    GlobalAveragePooling2D,
-    Dropout,
-    BatchNormalization
-)
-
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.applications import ResNet50
-
 from tensorflow.keras.callbacks import (
     ModelCheckpoint,
     EarlyStopping,
-    ReduceLROnPlateau
+    ReduceLROnPlateau,
+    TensorBoard
 )
 
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    f1_score
-)
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
 
 from preprocessing import load_data_generators
 
 
 # ======================================================
-# SET RANDOM SEED
+# SEED SETUP (REPRODUCIBLE)
 # ======================================================
 
 def set_seed(seed):
-
     os.environ['PYTHONHASHSEED'] = str(seed)
-
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
 
 
 # ======================================================
-# BUILD MODEL + TRAIN
+# MODEL TRAINING
 # ======================================================
 
-def create_model_and_train_finetuning(
-        train_gen,
-        val_gen,
-        model_name='resnet50_robustness'
-):
+def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 
     print(f"\n--- Building Model {model_name} ---")
 
@@ -63,25 +47,18 @@ def create_model_and_train_finetuning(
         input_shape=(224, 224, 3)
     )
 
-    # ==================================================
-    # STAGE 1 - TRAIN HEAD
-    # ==================================================
-
+    # =========================
+    # STAGE 1: TRAIN HEAD
+    # =========================
     base_model.trainable = False
 
-    x = base_model.output
-    x = GlobalAveragePooling2D()(x)
-
+    x = GlobalAveragePooling2D()(base_model.output)
     x = Dense(256, activation='relu')(x)
     x = BatchNormalization()(x)
     x = Dropout(0.5)(x)
+    outputs = Dense(3, activation='softmax')(x)
 
-    predictions = Dense(3, activation='softmax')(x)
-
-    model = Model(
-        inputs=base_model.input,
-        outputs=predictions
-    )
+    model = Model(inputs=base_model.input, outputs=outputs)
 
     model.compile(
         optimizer=Adam(learning_rate=1e-3),
@@ -89,49 +66,16 @@ def create_model_and_train_finetuning(
         metrics=['accuracy']
     )
 
-    print("\n--- Stage 1: Training Head ---")
+    # =========================
+    # LOGGING
+    # =========================
+    log_dir = f"logs/{model_name}"
+    os.makedirs(log_dir, exist_ok=True)
 
-    model.fit(
-        train_gen,
-        validation_data=val_gen,
-        epochs=25,
-        callbacks=[
-
-            EarlyStopping(
-                monitor='val_loss',
-                patience=5,
-                restore_best_weights=True
-            ),
-
-            ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.2,
-                patience=3
-            )
-
-        ]
+    tensorboard = TensorBoard(
+        log_dir=log_dir,
+        histogram_freq=1
     )
-
-    # ==================================================
-    # STAGE 2 - FINE TUNING
-    # ==================================================
-
-    print("\n--- Stage 2: Fine-Tuning ---")
-
-    base_model.trainable = True
-
-    fine_tune_at = 140
-
-    for layer in base_model.layers[:fine_tune_at]:
-        layer.trainable = False
-
-    model.compile(
-        optimizer=Adam(learning_rate=1e-5),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-
-    os.makedirs('saved_models', exist_ok=True)
 
     checkpoint = ModelCheckpoint(
         filepath=f'saved_models/best_{model_name}.keras',
@@ -142,336 +86,205 @@ def create_model_and_train_finetuning(
 
     early_stopping = EarlyStopping(
         monitor='val_loss',
-        patience=10,
+        patience=5,
         restore_best_weights=True
     )
 
     reduce_lr = ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.2,
-        patience=3,
-        min_lr=1e-6
+        patience=3
     )
 
-    history = model.fit(
+    print("\n--- Stage 1: Training Head ---")
+
+    history1 = model.fit(
+        train_gen,
+        validation_data=val_gen,
+        epochs=25,
+        callbacks=[early_stopping, reduce_lr, tensorboard]
+    )
+
+    # =========================
+    # STAGE 2: FINE TUNING
+    # =========================
+
+    print("\n--- Stage 2: Fine-Tuning ---")
+
+    base_model.trainable = True
+
+    for layer in base_model.layers[:140]:
+        layer.trainable = False
+
+    model.compile(
+        optimizer=Adam(learning_rate=1e-5),
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
+
+    history2 = model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=50,
-        callbacks=[
-            checkpoint,
-            early_stopping,
-            reduce_lr
-        ]
+        callbacks=[checkpoint, early_stopping, reduce_lr, tensorboard]
     )
 
-    return model, history
+    # =========================
+    # SAVE HISTORY
+    # =========================
+    os.makedirs("logs", exist_ok=True)
+    np.save(f"logs/{model_name}_history.npy", history2.history)
+
+    return model, history2
 
 
 # ======================================================
 # EVALUATION
 # ======================================================
 
-def evaluate_multiple_tests(
-        model,
-        test_generators,
-        model_name
-):
+def evaluate_multiple_tests(model, test_generators, model_name):
 
-    print(f"\n--- Evaluating Model {model_name} ---")
+    print(f"\n--- Evaluating {model_name} ---")
 
-    model.load_weights(
-        f'saved_models/best_{model_name}.keras'
-    )
-
-    print("✅ Best weights loaded.")
+    model.load_weights(f'saved_models/best_{model_name}.keras')
 
     results = {}
 
     important_conditions = [
-        # BASELINE
         'Normal',
-
-        # BRIGHTEN
-        'Brighten_L1',
-        'Brighten_L3',
-        'Brighten_L5',
-
-        # DARKEN
-        'Darken_L1',
-        'Darken_L3',
-        'Darken_L5',
-
-        # BLUR
-        'Blur_L1',
-        'Blur_L3',
-        'Blur_L5',
-
-        # LOW COMPRESSION
-        'Low Compression_L1',
-        'Low Compression_L3',
-        'Low Compression_L5',
-
-        # ROTATE
-        'Rotate_L1',
-        'Rotate_L3',
-        'Rotate_L5'
+        'Brighten_L1', 'Brighten_L3', 'Brighten_L5',
+        'Darken_L1', 'Darken_L3', 'Darken_L5',
+        'Blur_L1', 'Blur_L3', 'Blur_L5',
+        'Low Compression_L1', 'Low Compression_L3', 'Low Compression_L5',
+        'Rotate_L1', 'Rotate_L3', 'Rotate_L5'
     ]
 
-    for deg_type, test_gen in test_generators.items():
+    for name, gen in test_generators.items():
 
-        print(f"\n--- Testing on: {deg_type} ---")
+        print(f"\n--- Testing: {name} ---")
 
-        test_gen.reset()
+        gen.reset()
 
-        Y_pred = model.predict(
-            test_gen,
-            verbose=0
-        )
+        preds = model.predict(gen, verbose=0)
+        y_pred = np.argmax(preds, axis=1)
 
-        y_pred = np.argmax(Y_pred, axis=1)
+        gen.reset()
 
-        test_gen.reset()
+        loss, acc = model.evaluate(gen, verbose=0)
 
-        test_loss, test_acc = model.evaluate(
-            test_gen,
-            verbose=0
-        )
+        f1 = f1_score(gen.classes, y_pred, average='macro')
 
-        macro_f1 = f1_score(
-            test_gen.classes,
-            y_pred,
-            average='macro'
-        )
+        print(f"Accuracy: {acc:.4f}")
+        print(f"Macro F1: {f1:.4f}")
 
-        print(f"Accuracy  : {test_acc:.4f}")
-        print(f"Macro-F1  : {macro_f1:.4f}")
+        print(classification_report(gen.classes, y_pred))
 
-        class_names = list(
-            test_gen.class_indices.keys()
-        )
+        if name in important_conditions:
 
-        print("\nClassification Report:")
+            cm = confusion_matrix(gen.classes, y_pred)
 
-        print(
-            classification_report(
-                test_gen.classes,
-                y_pred,
-                target_names=class_names
-            )
-        )
+            plt.figure(figsize=(6, 5))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
 
-        # ==================================================
-        # CONFUSION MATRIX (ONLY IMPORTANT CONDITIONS)
-        # ==================================================
+            plt.title(f"Confusion Matrix - {name}")
+            plt.xlabel("Predicted")
+            plt.ylabel("Actual")
 
-        if deg_type in important_conditions:
+            os.makedirs("confusion_matrices", exist_ok=True)
 
-            cm = confusion_matrix(
-                test_gen.classes,
-                y_pred
-            )
-
-            plt.figure(figsize=(7, 6))
-
-            sns.heatmap(
-                cm,
-                annot=True,
-                fmt='d',
-                cmap='Blues',
-                xticklabels=class_names,
-                yticklabels=class_names
-            )
-
-            plt.title(
-                f'Confusion Matrix - {deg_type} ResNet50'
-            )
-
-            plt.xlabel('Predicted Label')
-            plt.ylabel('True Label')
-
-            plt.tight_layout()
-
-            os.makedirs(
-                'confusion_matrices',
-                exist_ok=True
-            )
-
-            save_path = (
-                f'confusion_matrices/'
-                f'cm_{deg_type}_{model_name}.png'
-            )
-
-            plt.savefig(
-                save_path,
-                dpi=300,
-                bbox_inches='tight'
-            )
-
-            print(f"📁 Saved: {save_path}")
-
+            plt.savefig(f"confusion_matrices/cm_{name}_{model_name}.png")
             plt.close()
 
-        # ==================================================
-        # SAVE RESULTS
-        # ==================================================
-
-        results[deg_type] = {
-            'accuracy': test_acc,
-            'macro_f1': macro_f1
+        results[name] = {
+            "accuracy": acc,
+            "macro_f1": f1
         }
 
     return results
 
 
 # ======================================================
-# MAIN
+# MAIN EXPERIMENT
 # ======================================================
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
     seeds = [42, 123, 999]
-
     all_results = []
 
     for seed in seeds:
 
-        print("\n====================================")
-        print(f"RUNNING EXPERIMENT - SEED {seed}")
-        print("====================================")
-
-        # ==================================================
-        # SET SEED
-        # ==================================================
+        print("\n==============================")
+        print(f"SEED {seed}")
+        print("==============================")
 
         set_seed(seed)
 
-        # ==================================================
-        # LOAD DATA
-        # ==================================================
-
-        train_gen, val_gen, test_gens_eval, _ = \
-            load_data_generators()
-
-        # ==================================================
-        # TRAIN MODEL
-        # ==================================================
+        train_gen, val_gen, test_eval, _ = load_data_generators()
 
         model, history = create_model_and_train_finetuning(
             train_gen,
             val_gen,
-            model_name=f'resnet50_seed_{seed}'
+            model_name=f"resnet50_seed_{seed}"
         )
 
-        # ==================================================
-        # SAVE TRAINING CURVE
-        # ==================================================
+        # =========================
+        # PLOT TRAINING
+        # =========================
 
-        os.makedirs('plots', exist_ok=True)
+        os.makedirs("plots", exist_ok=True)
 
-        plt.figure(figsize=(8, 5))
-
-        plt.plot(history.history['accuracy'])
-        plt.plot(history.history['val_accuracy'])
-
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy')
-
-        plt.legend([
-            'Train Accuracy',
-            'Validation Accuracy'
-        ])
-
-        plt.title(
-            f'Training Curve - Seed {seed}'
-        )
-
-        plt.tight_layout()
-
-        plt.savefig(
-            f'plots/training_curve_seed_{seed}.png',
-            dpi=300
-        )
-
+        plt.figure()
+        plt.plot(history.history['accuracy'], label='train')
+        plt.plot(history.history['val_accuracy'], label='val')
+        plt.legend()
+        plt.title(f"Accuracy Seed {seed}")
+        plt.savefig(f"plots/acc_seed_{seed}.png")
         plt.close()
 
-        # ==================================================
+        # =========================
         # EVALUATE
-        # ==================================================
+        # =========================
 
         results = evaluate_multiple_tests(
             model,
-            test_gens_eval,
-            f'resnet50_seed_{seed}'
+            test_eval,
+            f"resnet50_seed_{seed}"
         )
 
         all_results.append(results)
 
     # ======================================================
-    # FINAL MEAN ± STD
+    # FINAL SUMMARY
     # ======================================================
 
-    print("\n====================================")
-    print("FINAL RESULTS (MEAN ± STD)")
-    print("====================================")
+    print("\n===== FINAL RESULTS =====")
 
-    degradation_types = all_results[0].keys()
-
+    conditions = all_results[0].keys()
     final_rows = []
 
-    for deg in degradation_types:
+    for c in conditions:
 
-        acc_scores = [
-            run[deg]['accuracy']
-            for run in all_results
-        ]
+        accs = [r[c]["accuracy"] for r in all_results]
+        f1s = [r[c]["macro_f1"] for r in all_results]
 
-        f1_scores = [
-            run[deg]['macro_f1']
-            for run in all_results
-        ]
-
-        acc_mean = np.mean(acc_scores)
-        acc_std = np.std(acc_scores)
-
-        f1_mean = np.mean(f1_scores)
-        f1_std = np.std(f1_scores)
-
-        print(f"\n{deg}")
-
-        print(
-            f"Accuracy : "
-            f"{acc_mean:.4f} ± {acc_std:.4f}"
-        )
-
-        print(
-            f"Macro-F1 : "
-            f"{f1_mean:.4f} ± {f1_std:.4f}"
-        )
+        print(f"\n{c}")
+        print(f"Accuracy: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
+        print(f"F1 Score: {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
 
         final_rows.append({
-
-            'Condition': deg,
-
-            'Accuracy Mean': acc_mean,
-            'Accuracy Std': acc_std,
-
-            'MacroF1 Mean': f1_mean,
-            'MacroF1 Std': f1_std
-
+            "Condition": c,
+            "Accuracy Mean": np.mean(accs),
+            "Accuracy Std": np.std(accs),
+            "F1 Mean": np.mean(f1s),
+            "F1 Std": np.std(f1s)
         })
 
-    # ======================================================
-    # SAVE CSV
-    # ======================================================
+    os.makedirs("results", exist_ok=True)
 
-    os.makedirs('results', exist_ok=True)
-
-    df = pd.DataFrame(final_rows)
-
-    csv_path = (
-        'results/resnet50_final_results.csv'
+    pd.DataFrame(final_rows).to_csv(
+        "results/final_results.csv",
+        index=False
     )
 
-    df.to_csv(csv_path, index=False)
-
-    print(f"\n📁 CSV saved to: {csv_path}")
+    print("\nSaved: results/final_results.csv")
