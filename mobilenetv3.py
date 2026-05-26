@@ -27,8 +27,8 @@ def build_and_train(train_gen, val_gen, name):
     base.trainable = False
 
     x = GlobalAveragePooling2D()(base.output)
-    x = Dense(128, activation='relu')(x)
-    x = Dropout(0.3)(x)
+    x = Dense(256, activation='relu')(x)
+    x = Dropout(0.5)(x)
     out = Dense(3, activation='softmax')(x)
 
     model = Model(base.input, out)
