@@ -1,7 +1,9 @@
+# preprocessing.py
 import os
 import numpy as np
-import tensorflow as tf
+import cv2
 import random
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 DATASET_PATH = "Dataset"
 IMG_SIZE = (224, 224)
@@ -18,84 +20,117 @@ SEVERITY_LEVELS = {
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
-    tf.random.set_seed(seed)
 
 
 # =========================
-# TF DATA PIPELINE (FAST)
+# DEGRADATION FUNCTION (SAFE)
 # =========================
+def create_degraded_image(image, deg="Normal", lvl=None):
 
+    img = np.array(image)
+
+    if deg == "Normal":
+        return img
+
+    if img.shape[-1] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    if deg == "Brighten":
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * lvl, 0, 255)
+        img = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    elif deg == "Darken":
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * lvl, 0, 255)
+        img = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    elif deg == "Blur":
+        k = int(lvl)
+        if k % 2 == 0:
+            k += 1
+        img = cv2.GaussianBlur(img, (k, k), 0)
+
+    elif deg == "Low Compression":
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), int(lvl)]
+        _, enc = cv2.imencode('.jpg', img, encode_param)
+        img = cv2.imdecode(enc, 1)
+
+    elif deg == "Rotate":
+        h, w = img.shape[:2]
+        M = cv2.getRotationMatrix2D((w//2, h//2), lvl, 1)
+        img = cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return img.astype(np.float32)
+
+
+# =========================
+# DATA LOADER (STABLE VERSION)
+# =========================
 def load_data_generators(batch_size=64):
 
-    print("\n===== LOADING DATA (TF.DATA FAST VERSION) =====")
+    print("\n===== LOADING DATA =====")
 
-    train_ds = tf.keras.utils.image_dataset_from_directory(
+    train_datagen = ImageDataGenerator(
+        rescale=1./255,
+        validation_split=0.2,
+        zoom_range=0.15,
+        width_shift_range=0.1,
+        height_shift_range=0.1,
+        horizontal_flip=True
+    )
+
+    train_gen = train_datagen.flow_from_directory(
         os.path.join(DATASET_PATH, "train"),
-        image_size=IMG_SIZE,
+        target_size=IMG_SIZE,
         batch_size=batch_size,
-        label_mode="categorical",
+        class_mode="categorical",
+        subset="training",
         shuffle=True
     )
 
-    val_ds = tf.keras.utils.image_dataset_from_directory(
+    val_gen = train_datagen.flow_from_directory(
         os.path.join(DATASET_PATH, "train"),
-        image_size=IMG_SIZE,
+        target_size=IMG_SIZE,
         batch_size=batch_size,
-        label_mode="categorical",
-        shuffle=False,
-        validation_split=0.2,
+        class_mode="categorical",
         subset="validation",
-        seed=42
-    )
-
-    test_ds = tf.keras.utils.image_dataset_from_directory(
-        os.path.join(DATASET_PATH, "test"),
-        image_size=IMG_SIZE,
-        batch_size=1,
-        label_mode="categorical",
         shuffle=False
     )
 
-    AUTOTUNE = tf.data.AUTOTUNE
+    # =========================
+    # TEST NORMAL
+    # =========================
+    test_eval = {}
 
-    train_ds = train_ds.cache().prefetch(AUTOTUNE)
-    val_ds = val_ds.cache().prefetch(AUTOTUNE)
-    test_ds = test_ds.cache().prefetch(AUTOTUNE)
+    test_eval["Normal"] = ImageDataGenerator(rescale=1./255).flow_from_directory(
+        os.path.join(DATASET_PATH, "test"),
+        target_size=IMG_SIZE,
+        batch_size=1,
+        class_mode="categorical",
+        shuffle=False
+    )
 
     # =========================
-    # BUILD DEGRADATION TEST SETS 
+    # TEST DEGRADED
     # =========================
-    test_generators_eval = {"Normal": test_ds}
-
-    def apply_degradation(img, label, deg, lvl):
-        img = tf.cast(img, tf.float32)
-
-        if deg == "Brighten":
-            img = img * lvl
-        elif deg == "Darken":
-            img = img * lvl
-        elif deg == "Blur":
-            img = tf.image.random_brightness(img, max_delta=0.1)
-        elif deg == "Rotate":
-            img = tf.image.rot90(img, k=int(lvl) % 4)
-        elif deg == "Low Compression":
-            img = tf.image.random_jpeg_quality(img, 30, int(lvl))
-
-        return img, label
-
-    # generate degraded datasets
     for deg, levels in SEVERITY_LEVELS.items():
         for i, lvl in enumerate(levels, 1):
 
             key = f"{deg}_L{i}"
 
-            ds = test_ds.map(
-                lambda x, y, d=deg, l=lvl: apply_degradation(x, y, d, l),
-                num_parallel_calls=AUTOTUNE
-            ).cache().prefetch(AUTOTUNE)
-
-            test_generators_eval[key] = ds
+            test_eval[key] = ImageDataGenerator(
+                rescale=1./255,
+                preprocessing_function=lambda img, d=deg, l=lvl: create_degraded_image(img, d, l)
+            ).flow_from_directory(
+                os.path.join(DATASET_PATH, "test"),
+                target_size=IMG_SIZE,
+                batch_size=1,
+                class_mode="categorical",
+                shuffle=False
+            )
 
     print("===== DATA LOADING COMPLETE =====")
 
-    return train_ds, val_ds, test_generators_eval
+    return train_gen, val_gen, test_eval
