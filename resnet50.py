@@ -6,7 +6,6 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam
@@ -21,8 +20,13 @@ from tensorflow.keras.callbacks import (
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from preprocessing import load_data_generators
 
-mixed_precision.set_global_policy('mixed_float16')
+
+# ======================================================
+# SPEED + STABILITY CONFIG
+# ======================================================
 tf.config.optimizer.set_jit(True)
+tf.keras.mixed_precision.set_global_policy("float32")
+
 
 # ======================================================
 # SEED
@@ -35,7 +39,7 @@ def set_seed(seed):
 
 
 # ======================================================
-# MODEL
+# MODEL TRAINING
 # ======================================================
 def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 
@@ -44,8 +48,7 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     base_model = ResNet50(
         weights='imagenet',
         include_top=False,
-        input_shape=(224, 224, 3),
-        pooling='avg'   # 🔥 FAST MODE
+        input_shape=(224, 224, 3)
     )
 
     # =========================
@@ -53,28 +56,41 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     # =========================
     base_model.trainable = False
 
-    x = base_model.output
+    x = GlobalAveragePooling2D()(base_model.output)
     x = Dense(256, activation='relu')(x)
     x = BatchNormalization()(x)
     x = Dropout(0.5)(x)
-
-    outputs = Dense(3, activation='softmax', dtype='float32')(x)
+    outputs = Dense(3, activation='softmax')(x)
 
     model = Model(inputs=base_model.input, outputs=outputs)
 
     model.compile(
-        optimizer=Adam(learning_rate=1e-3, clipnorm=1.0),
+        optimizer=Adam(learning_rate=1e-3),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
 
+    # =========================
+    # LOGGING
+    # =========================
     log_dir = f"logs/{model_name}"
     os.makedirs(log_dir, exist_ok=True)
 
     tensorboard = TensorBoard(
         log_dir=log_dir,
-        histogram_freq=0,
-        update_freq='batch'
+        histogram_freq=0
+    )
+
+    # =========================
+    # CHECKPOINT (FIXED .h5)
+    # =========================
+    os.makedirs("saved_models", exist_ok=True)
+
+    checkpoint = ModelCheckpoint(
+        filepath=f'saved_models/best_{model_name}.h5',  
+        monitor='val_accuracy',
+        save_best_only=True,
+        mode='max'
     )
 
     early_stopping = EarlyStopping(
@@ -85,19 +101,18 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 
     reduce_lr = ReduceLROnPlateau(
         monitor='val_loss',
-        factor=0.2,
-        patience=3
+        factor=0.3,
+        patience=2
     )
 
     print("\n--- Stage 1 Training ---")
 
-    history1 = model.fit(
+    model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=25,
-        workers=4,
-        use_multiprocessing=True,
-        callbacks=[early_stopping, reduce_lr, tensorboard]
+        callbacks=[early_stopping, reduce_lr, tensorboard],
+        verbose=1
     )
 
     # =========================
@@ -111,30 +126,22 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
         layer.trainable = False
 
     model.compile(
-        optimizer=Adam(learning_rate=1e-5, clipnorm=1.0),
+        optimizer=Adam(learning_rate=1e-5),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
 
-    os.makedirs('saved_models', exist_ok=True)
-
-    checkpoint = ModelCheckpoint(
-        filepath=f'saved_models/best_{model_name}.keras',
-        monitor='val_accuracy',
-        save_best_only=True,
-        mode='max'
-    )
-
-    history2 = model.fit(
+    history = model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=50,
-        workers=4,
-        use_multiprocessing=True,
-        callbacks=[checkpoint, early_stopping, reduce_lr, tensorboard]
+        callbacks=[checkpoint, early_stopping, reduce_lr, tensorboard],
+        verbose=1
     )
 
-    return model, history2
+    np.save(f"logs/{model_name}_history.npy", history.history)
+
+    return model, history
 
 
 # ======================================================
@@ -144,17 +151,17 @@ def evaluate_multiple_tests(model, test_generators, model_name):
 
     print(f"\n--- Evaluating {model_name} ---")
 
-    model.load_weights(f'saved_models/best_{model_name}.keras')
+    model.load_weights(f'saved_models/best_{model_name}.h5')  
 
     results = {}
 
     important_conditions = [
         'Normal',
-        'Brighten_L1', 'Brighten_L3', 'Brighten_L5',
-        'Darken_L1', 'Darken_L3', 'Darken_L5',
-        'Blur_L1', 'Blur_L3', 'Blur_L5',
-        'Low Compression_L1', 'Low Compression_L3', 'Low Compression_L5',
-        'Rotate_L1', 'Rotate_L3', 'Rotate_L5'
+        'Brighten_L1','Brighten_L3','Brighten_L5',
+        'Darken_L1','Darken_L3','Darken_L5',
+        'Blur_L1','Blur_L3','Blur_L5',
+        'Low Compression_L1','Low Compression_L3','Low Compression_L5',
+        'Rotate_L1','Rotate_L3','Rotate_L5'
     ]
 
     for name, gen in test_generators.items():
@@ -168,23 +175,24 @@ def evaluate_multiple_tests(model, test_generators, model_name):
 
         gen.reset()
 
-        loss, acc = model.evaluate(gen, verbose=0)
-
+        acc = model.evaluate(gen, verbose=0)[1]
         f1 = f1_score(gen.classes, y_pred, average='macro')
 
         print(f"Accuracy: {acc:.4f}")
-        print(f"F1 Score: {f1:.4f}")
+        print(f"F1: {f1:.4f}")
+
+        print(classification_report(gen.classes, y_pred))
 
         if name in important_conditions:
 
             cm = confusion_matrix(gen.classes, y_pred)
 
-            plt.figure(figsize=(6, 5))
+            plt.figure(figsize=(6,5))
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
 
-            plt.title(f"Confusion Matrix - {name}")
-            plt.xlabel("Predicted")
-            plt.ylabel("Actual")
+            plt.title(f"{name} - ResNet50")
+            plt.xlabel("Pred")
+            plt.ylabel("True")
 
             os.makedirs("confusion_matrices", exist_ok=True)
             plt.savefig(f"confusion_matrices/cm_{name}_{model_name}.png")
@@ -227,11 +235,11 @@ if __name__ == "__main__":
         # =========================
         os.makedirs("plots", exist_ok=True)
 
-        plt.plot(history.history['accuracy'], label='train')
-        plt.plot(history.history['val_accuracy'], label='val')
-        plt.legend()
-        plt.title(f"Seed {seed}")
-        plt.savefig(f"plots/acc_seed_{seed}.png")
+        plt.plot(history.history['accuracy'])
+        plt.plot(history.history['val_accuracy'])
+        plt.legend(['train','val'])
+        plt.title(f"ResNet50 Seed {seed}")
+        plt.savefig(f"plots/resnet50_seed_{seed}.png")
         plt.close()
 
         # =========================
@@ -245,9 +253,9 @@ if __name__ == "__main__":
 
         all_results.append(results)
 
-    # ======================================================
+    # =========================
     # FINAL RESULT
-    # ======================================================
+    # =========================
     print("\n===== FINAL RESULTS =====")
 
     conditions = all_results[0].keys()
@@ -259,8 +267,8 @@ if __name__ == "__main__":
         f1s = [r[c]["macro_f1"] for r in all_results]
 
         print(f"\n{c}")
-        print(f"Accuracy: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
-        print(f"F1 Score: {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
+        print(f"Acc: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
+        print(f"F1 : {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
 
         final_rows.append({
             "Condition": c,
@@ -273,8 +281,8 @@ if __name__ == "__main__":
     os.makedirs("results", exist_ok=True)
 
     pd.DataFrame(final_rows).to_csv(
-        "results/final_results.csv",
+        "results/resnet50_final_results.csv",
         index=False
     )
 
-    print("\nSaved: results/final_results.csv")
+    print("\nSaved results.")

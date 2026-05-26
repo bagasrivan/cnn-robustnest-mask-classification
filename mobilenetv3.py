@@ -22,12 +22,15 @@ from preprocessing import load_data_generators
 
 
 # ======================================================
-# SPEED OPTIMIZATION (IMPORTANT)
+# SPEED OPTIMIZATION
 # ======================================================
-tf.config.optimizer.set_jit(True)  # XLA ACCELERATION
-tf.keras.mixed_precision.set_global_policy("mixed_float16")
+tf.config.optimizer.set_jit(True)
+tf.keras.mixed_precision.set_global_policy("float32")
 
 
+# ======================================================
+# SEED
+# ======================================================
 def set_seed(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)
     random.seed(seed)
@@ -36,7 +39,7 @@ def set_seed(seed):
 
 
 # ======================================================
-# MODEL
+# MODEL BUILD + TRAIN
 # ======================================================
 def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 
@@ -49,7 +52,7 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     )
 
     # =========================
-    # STAGE 1 (FAST HEAD)
+    # STAGE 1 (HEAD TRAINING FAST)
     # =========================
     base_model.trainable = False
 
@@ -57,8 +60,7 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     x = Dense(128, activation='relu')(x)
     x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
-
-    outputs = Dense(3, activation='softmax', dtype='float32')(x)
+    outputs = Dense(3, activation='softmax')(x)
 
     model = Model(inputs=base_model.input, outputs=outputs)
 
@@ -69,20 +71,20 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     )
 
     # =========================
-    # TENSORBOARD (IMPORTANT)
+    # LOGGING
     # =========================
     log_dir = f"logs/{model_name}"
     os.makedirs(log_dir, exist_ok=True)
 
     tensorboard = TensorBoard(
         log_dir=log_dir,
-        histogram_freq=0,   # 🔥 lebih cepat
+        histogram_freq=0,
         write_graph=False
     )
 
     early_stopping = EarlyStopping(
         monitor='val_loss',
-        patience=3,
+        patience=5,
         restore_best_weights=True
     )
 
@@ -92,24 +94,24 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
         patience=2
     )
 
-    print("\n--- Stage 1: Training Head (FAST) ---")
+    print("\n--- Stage 1 Training (FAST) ---")
 
     model.fit(
         train_gen,
         validation_data=val_gen,
-        epochs=10,   # 🔥 DIPERCEPAT (dari 25 → 10)
+        epochs=25, 
         callbacks=[early_stopping, reduce_lr, tensorboard],
         verbose=1
     )
 
     # =========================
-    # STAGE 2 (FINE TUNE LIGHT)
+    # STAGE 2 (FINE TUNING LIGHT)
     # =========================
-    print("\n--- Stage 2: Fine-Tuning ---")
+    print("\n--- Stage 2 Fine-tuning ---")
 
     base_model.trainable = True
 
-    for layer in base_model.layers[:80]:  # 🔥 lebih ringan dari 140/60
+    for layer in base_model.layers[:60]:  
         layer.trainable = False
 
     model.compile(
@@ -118,34 +120,36 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
         metrics=['accuracy']
     )
 
+    os.makedirs("saved_models", exist_ok=True)
+
     checkpoint = ModelCheckpoint(
-        filepath=f'saved_models/best_{model_name}.keras',
+        filepath=f'saved_models/best_{model_name}.h5',  
         monitor='val_accuracy',
-        save_best_only=True
+        save_best_only=True,
+        mode='max'
     )
 
     history = model.fit(
         train_gen,
         validation_data=val_gen,
-        epochs=20,   # 🔥 dari 50 → 20
+        epochs=50,  
         callbacks=[checkpoint, early_stopping, reduce_lr, tensorboard],
         verbose=1
     )
 
-    os.makedirs("logs", exist_ok=True)
     np.save(f"logs/{model_name}_history.npy", history.history)
 
     return model, history
 
 
 # ======================================================
-# EVALUATION (FIXED + CLEAN)
+# EVALUATION
 # ======================================================
 def evaluate_multiple_tests(model, test_generators, model_name):
 
     print(f"\n--- Evaluating {model_name} ---")
 
-    model.load_weights(f'saved_models/best_{model_name}.keras')
+    model.load_weights(f'saved_models/best_{model_name}.h5')
 
     results = {}
 
@@ -175,15 +179,18 @@ def evaluate_multiple_tests(model, test_generators, model_name):
         print(f"Accuracy: {acc:.4f}")
         print(f"F1: {f1:.4f}")
 
+        print(classification_report(gen.classes, y_pred))
+
         if name in important_conditions:
 
             cm = confusion_matrix(gen.classes, y_pred)
 
             plt.figure(figsize=(6,5))
-            sns.heatmap(cm, annot=True, fmt='d')
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
 
             plt.title(f"{name} - MobileNetV3")
-            plt.tight_layout()
+            plt.xlabel("Pred")
+            plt.ylabel("True")
 
             os.makedirs("confusion_matrices", exist_ok=True)
             plt.savefig(f"confusion_matrices/cm_{name}_{model_name}.png")
@@ -221,6 +228,9 @@ if __name__ == "__main__":
             model_name=f"mobilenetv3_seed_{seed}"
         )
 
+        # =========================
+        # PLOT
+        # =========================
         os.makedirs("plots", exist_ok=True)
 
         plt.plot(history.history['accuracy'])
@@ -230,6 +240,9 @@ if __name__ == "__main__":
         plt.savefig(f"plots/mobilenetv3_seed_{seed}.png")
         plt.close()
 
+        # =========================
+        # EVALUATION
+        # =========================
         results = evaluate_multiple_tests(
             model,
             test_eval,
@@ -238,6 +251,9 @@ if __name__ == "__main__":
 
         all_results.append(results)
 
+    # =========================
+    # FINAL RESULTS
+    # =========================
     print("\n===== FINAL RESULTS =====")
 
     conditions = all_results[0].keys()
