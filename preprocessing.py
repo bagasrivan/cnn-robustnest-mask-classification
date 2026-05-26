@@ -139,4 +139,4 @@ def load_data_generators(batch_size=64):
 
     print("===== DATA LOADING COMPLETE =====")
 
-    return train_gen, val_gen, test_generators_eval, test_generators_visual
+    return train_gen, val_gen, test_generators_eval
