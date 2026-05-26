@@ -1,162 +1,111 @@
 import os
-import random
 import numpy as np
-import pandas as pd
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.applications import MobileNetV3Large
-from tensorflow.keras.callbacks import (
-    ModelCheckpoint,
-    EarlyStopping,
-    ReduceLROnPlateau,
-    TensorBoard
-)
 
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
-from preprocessing import load_data_generators
+from preprocessing import load_data_generators, set_seed
 
 
 # ======================================================
-# SPEED MODE 
+# TRAIN + MODEL
 # ======================================================
-tf.config.optimizer.set_jit(True)
-tf.keras.mixed_precision.set_global_policy("mixed_float16")
+def build_and_train(train_gen, val_gen, name):
 
-
-# ======================================================
-# SEED
-# ======================================================
-def set_seed(seed):
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-
-
-# ======================================================
-# MODEL
-# ======================================================
-def create_model_and_train_finetuning(train_gen, val_gen, model_name):
-
-    print(f"\n--- Building Model {model_name} ---")
-
-    base_model = MobileNetV3Large(
+    base = MobileNetV3Large(
         weights='imagenet',
         include_top=False,
-        input_shape=(224, 224, 3)
+        input_shape=(224,224,3)
     )
 
-    # =========================
-    # STAGE 1 (HEAD TRAINING)
-    # =========================
-    base_model.trainable = False
+    base.trainable = False
 
-    x = GlobalAveragePooling2D()(base_model.output)
+    x = GlobalAveragePooling2D()(base.output)
     x = Dense(128, activation='relu')(x)
-    x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
+    out = Dense(3, activation='softmax')(x)
 
-    outputs = Dense(3, activation='softmax', dtype='float32')(x)
-
-    model = Model(inputs=base_model.input, outputs=outputs)
+    model = Model(base.input, out)
 
     model.compile(
-        optimizer=Adam(learning_rate=2e-3),
+        optimizer=Adam(1e-3),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
 
     # =========================
-    # LOGGING
+    # TRAINING HEAD
     # =========================
-    log_dir = f"logs/{model_name}"
-    os.makedirs(log_dir, exist_ok=True)
-
-    tensorboard = TensorBoard(
-        log_dir=log_dir,
-        histogram_freq=0,
-        write_graph=False
-    )
-
-    early_stopping = EarlyStopping(
+    early_stop = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss',
         patience=5,
         restore_best_weights=True
     )
 
-    reduce_lr = ReduceLROnPlateau(
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.3,
         patience=2,
         min_lr=1e-6
     )
 
-    print("\n--- Stage 1 Training Head ---")
-
+    print("\n--- Stage 1 ---")
     model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=25,
-        callbacks=[early_stopping, reduce_lr, tensorboard],
-        verbose=1
+        callbacks=[early_stop, reduce_lr]
     )
 
     # =========================
-    # STAGE 2 (FINE TUNING)
+    # FINE TUNING
     # =========================
-    print("\n--- Stage 2 Fine-tuning ---")
+    base.trainable = True
 
-    base_model.trainable = True
-
-    for layer in base_model.layers[:60]:
-        layer.trainable = False
+    for l in base.layers[:60]:
+        l.trainable = False
 
     model.compile(
-        optimizer=Adam(learning_rate=1e-5),
+        optimizer=Adam(1e-5),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
 
-    os.makedirs("saved_models", exist_ok=True)
-
-    checkpoint = ModelCheckpoint(
-        filepath=f"saved_models/best_{model_name}.keras",
+    ckpt = tf.keras.callbacks.ModelCheckpoint(
+        f"best_{name}.h5",
         monitor='val_accuracy',
-        save_best_only=True,
-        mode='max',
-        verbose=1
+        save_best_only=True
     )
 
+    print("\n--- Stage 2 ---")
     history = model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=50,
-        callbacks=[checkpoint, early_stopping, reduce_lr],
-        verbose=1
+        callbacks=[ckpt, early_stop, reduce_lr]
     )
 
-    np.save(f"logs/{model_name}_history.npy", history.history)
-
-    return model, history
+    return model, f"best_{name}.h5"
 
 
 # ======================================================
-# EVALUATION 
+# EVALUATION
 # ======================================================
-def evaluate_multiple_tests(model, test_generators, model_name):
+def evaluate(model, test_generators, model_name):
 
-    print(f"\n--- Evaluating {model_name} ---")
+    print(f"\n--- EVALUATING {model_name} ---")
 
-    model.load_weights(f"saved_models/best_{model_name}.keras")
+    model.load_weights(f"best_{model_name}.h5")
 
     results = {}
 
-    important_conditions = [
+    important = [
         'Normal',
         'Brighten_L1','Brighten_L3','Brighten_L5',
         'Darken_L1','Darken_L3','Darken_L5',
@@ -172,30 +121,34 @@ def evaluate_multiple_tests(model, test_generators, model_name):
         preds = model.predict(gen, verbose=0)
         y_pred = np.argmax(preds, axis=1)
 
-        gen.reset()
-
         acc = model.evaluate(gen, verbose=0)[1]
         f1 = f1_score(gen.classes, y_pred, average='macro')
 
         print(f"{name} | Acc: {acc:.4f} | F1: {f1:.4f}")
 
-        if name in important_conditions:
+        # =========================
+        # CONFUSION MATRIX
+        # =========================
+        if name in important:
 
             cm = confusion_matrix(gen.classes, y_pred)
 
             plt.figure(figsize=(6,5))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-            plt.title(f"{name} - MobileNetV3")
-            plt.xlabel("Pred")
-            plt.ylabel("True")
+            sns.heatmap(cm, annot=True, fmt='d')
 
-            os.makedirs("confusion_matrices", exist_ok=True)
-            plt.savefig(f"confusion_matrices/cm_{name}_{model_name}.png")
+            plt.title(f"{name} - MobileNetV3")
+            plt.xlabel("Predicted")
+            plt.ylabel("Actual")
+
+            os.makedirs("cm", exist_ok=True)
+            plt.savefig(f"cm/cm_{name}_{model_name}.png")
             plt.close()
+
+        print(classification_report(gen.classes, y_pred))
 
         results[name] = {
             "accuracy": acc,
-            "macro_f1": f1
+            "f1": f1
         }
 
     return results
@@ -206,79 +159,37 @@ def evaluate_multiple_tests(model, test_generators, model_name):
 # ======================================================
 if __name__ == "__main__":
 
-    seeds = [42, 123, 999]
     all_results = []
 
-    for seed in seeds:
+    for seed in [42, 123, 999]:
 
-        print("\n==============================")
-        print(f"SEED {seed}")
-        print("==============================")
+        print("\n====================")
+        print("SEED", seed)
+        print("====================")
 
         set_seed(seed)
 
-        train_gen, val_gen, test_eval, _ = load_data_generators(batch_size=64)
+        train, val, test = load_data_generators(batch_size=32)
 
-        model, history = create_model_and_train_finetuning(
-            train_gen,
-            val_gen,
-            model_name=f"mobilenetv3_seed_{seed}"
-        )
+        model, path = build_and_train(train, val, f"mobilenet_{seed}")
 
-        # =========================
-        # PLOT
-        # =========================
-        os.makedirs("plots", exist_ok=True)
-
-        plt.figure()
-        plt.plot(history.history['accuracy'])
-        plt.plot(history.history['val_accuracy'])
-        plt.legend(['train','val'])
-        plt.title(f"MobileNetV3 Seed {seed}")
-        plt.savefig(f"plots/mobilenetv3_seed_{seed}.png")
-        plt.close()
-
-        # =========================
-        # EVALUATION
-        # =========================
-        results = evaluate_multiple_tests(
-            model,
-            test_eval,
-            f"mobilenetv3_seed_{seed}"
-        )
+        results = evaluate(model, test, f"mobilenet_{seed}")
 
         all_results.append(results)
 
-    # =========================
-    # FINAL RESULTS
-    # =========================
-    print("\n===== FINAL RESULTS =====")
 
-    conditions = all_results[0].keys()
-    final_rows = []
+    # ======================================================
+    # FINAL RESULT
+    # ======================================================
+    print("\n===== FINAL RESULT =====")
 
-    for c in conditions:
+    keys = all_results[0].keys()
 
-        accs = [r[c]["accuracy"] for r in all_results]
-        f1s = [r[c]["macro_f1"] for r in all_results]
+    for k in keys:
 
-        print(f"\n{c}")
+        accs = [r[k]["accuracy"] for r in all_results]
+        f1s = [r[k]["f1"] for r in all_results]
+
+        print(f"\n{k}")
         print(f"Acc: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
         print(f"F1 : {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
-
-        final_rows.append({
-            "Condition": c,
-            "Accuracy Mean": np.mean(accs),
-            "Accuracy Std": np.std(accs),
-            "F1 Mean": np.mean(f1s),
-            "F1 Std": np.std(f1s)
-        })
-
-    os.makedirs("results", exist_ok=True)
-
-    pd.DataFrame(final_rows).to_csv(
-        "results/mobilenetv3_final_results.csv",
-        index=False
-    )
-
-    print("\nSaved results.")

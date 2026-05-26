@@ -1,151 +1,111 @@
 import os
-import random
 import numpy as np
-import pandas as pd
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.callbacks import (
-    ModelCheckpoint,
-    EarlyStopping,
-    ReduceLROnPlateau,
-    TensorBoard
-)
 
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
-from preprocessing import load_data_generators
+from preprocessing import load_data_generators, set_seed
 
 
 # ======================================================
-# SEED 
+# TRAIN + EVAL MODEL
 # ======================================================
-def set_seed(seed):
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
+def build_and_train(train_gen, val_gen, name):
 
-
-# ======================================================
-# MODEL
-# ======================================================
-def create_model_and_train_finetuning(train_gen, val_gen, model_name):
-
-    print(f"\n--- Building Model {model_name} ---")
-
-    base_model = ResNet50(
+    base = ResNet50(
         weights='imagenet',
         include_top=False,
-        input_shape=(224, 224, 3)
+        input_shape=(224,224,3)
     )
 
-    # =========================
-    # STAGE 1: TRAIN HEAD
-    # =========================
-    base_model.trainable = False
+    base.trainable = False
 
-    x = GlobalAveragePooling2D()(base_model.output)
+    x = GlobalAveragePooling2D()(base.output)
     x = Dense(256, activation='relu')(x)
-    x = BatchNormalization()(x)
     x = Dropout(0.5)(x)
-    outputs = Dense(3, activation='softmax')(x)
+    out = Dense(3, activation='softmax')(x)
 
-    model = Model(inputs=base_model.input, outputs=outputs)
+    model = Model(base.input, out)
 
     model.compile(
-        optimizer=Adam(learning_rate=1e-3),
+        optimizer=Adam(1e-3),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
 
     # =========================
-    # CALLBACKS
+    # TRAINING HEAD
     # =========================
-    log_dir = f"logs/{model_name}"
-    os.makedirs(log_dir, exist_ok=True)
-
-    tensorboard = TensorBoard(
-        log_dir=log_dir,
-        histogram_freq=1
-    )
-
-    checkpoint = ModelCheckpoint(
-        filepath=f"saved_models/best_{model_name}.h5",
-        monitor='val_accuracy',
-        save_best_only=True,
-        mode='max'
-    )
-
-    early_stopping = EarlyStopping(
+    early_stop = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss',
         patience=5,
         restore_best_weights=True
     )
 
-    reduce_lr = ReduceLROnPlateau(
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.3,
-        patience=2
+        patience=2,
+        min_lr=1e-6
     )
 
-    os.makedirs("saved_models", exist_ok=True)
-
-    print("\n--- Stage 1 Training ---")
-
+    print("\n--- Stage 1 ---")
     model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=25,
-        callbacks=[early_stopping, reduce_lr, tensorboard],
-        verbose=1
+        callbacks=[early_stop, reduce_lr]
     )
 
     # =========================
-    # STAGE 2: FINE TUNING
+    # FINE TUNING
     # =========================
-    print("\n--- Stage 2 Fine-tuning ---")
+    base.trainable = True
 
-    base_model.trainable = True
-
-    for layer in base_model.layers[:140]:
-        layer.trainable = False
+    for l in base.layers[:140]:
+        l.trainable = False
 
     model.compile(
-        optimizer=Adam(learning_rate=1e-5),
+        optimizer=Adam(1e-5),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
 
+    ckpt = tf.keras.callbacks.ModelCheckpoint(
+        f"best_{name}.h5",
+        monitor='val_accuracy',
+        save_best_only=True
+    )
+
+    print("\n--- Stage 2 ---")
     history = model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=50,
-        callbacks=[checkpoint, early_stopping, reduce_lr],
-        verbose=1
+        callbacks=[ckpt, early_stop, reduce_lr]
     )
 
-    np.save(f"logs/{model_name}_history.npy", history.history)
-
-    return model, history
+    return model, f"best_{name}.h5"
 
 
 # ======================================================
 # EVALUATION
 # ======================================================
-def evaluate_multiple_tests(model, test_generators, model_name):
+def evaluate(model, test_generators, model_name):
 
-    print(f"\n--- Evaluating {model_name} ---")
+    print(f"\n--- EVALUATING {model_name} ---")
 
-    model.load_weights(f"saved_models/best_{model_name}.h5")
+    model.load_weights(f"best_{model_name}.h5")
 
     results = {}
 
-    important_conditions = [
+    important = [
         'Normal',
         'Brighten_L1','Brighten_L3','Brighten_L5',
         'Darken_L1','Darken_L3','Darken_L5',
@@ -161,30 +121,31 @@ def evaluate_multiple_tests(model, test_generators, model_name):
         preds = model.predict(gen, verbose=0)
         y_pred = np.argmax(preds, axis=1)
 
-        gen.reset()
-
         acc = model.evaluate(gen, verbose=0)[1]
         f1 = f1_score(gen.classes, y_pred, average='macro')
 
         print(f"{name} | Acc: {acc:.4f} | F1: {f1:.4f}")
 
-        if name in important_conditions:
+        if name in important:
+
             cm = confusion_matrix(gen.classes, y_pred)
 
             plt.figure(figsize=(6,5))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+            sns.heatmap(cm, annot=True, fmt='d')
 
             plt.title(f"{name} - ResNet50")
             plt.xlabel("Predicted")
             plt.ylabel("Actual")
 
-            os.makedirs("confusion_matrices", exist_ok=True)
-            plt.savefig(f"confusion_matrices/cm_{name}_{model_name}.png")
+            os.makedirs("cm", exist_ok=True)
+            plt.savefig(f"cm/cm_{name}_{model_name}.png")
             plt.close()
+
+        print(classification_report(gen.classes, y_pred))
 
         results[name] = {
             "accuracy": acc,
-            "macro_f1": f1
+            "f1": f1
         }
 
     return results
@@ -195,79 +156,37 @@ def evaluate_multiple_tests(model, test_generators, model_name):
 # ======================================================
 if __name__ == "__main__":
 
-    seeds = [42, 123, 999]
     all_results = []
 
-    for seed in seeds:
+    for seed in [42, 123, 999]:
 
-        print("\n==============================")
-        print(f"SEED {seed}")
-        print("==============================")
+        print("\n====================")
+        print("SEED", seed)
+        print("====================")
 
         set_seed(seed)
 
-        train_gen, val_gen, test_eval, _ = load_data_generators(batch_size=32)
+        train, val, test = load_data_generators(batch_size=32)
 
-        model, history = create_model_and_train_finetuning(
-            train_gen,
-            val_gen,
-            model_name=f"resnet50_seed_{seed}"
-        )
+        model, path = build_and_train(train, val, f"resnet_{seed}")
 
-        # =========================
-        # PLOT
-        # =========================
-        os.makedirs("plots", exist_ok=True)
-
-        plt.figure()
-        plt.plot(history.history['accuracy'])
-        plt.plot(history.history['val_accuracy'])
-        plt.legend(['train','val'])
-        plt.title(f"ResNet50 Seed {seed}")
-        plt.savefig(f"plots/resnet50_seed_{seed}.png")
-        plt.close()
-
-        # =========================
-        # EVAL
-        # =========================
-        results = evaluate_multiple_tests(
-            model,
-            test_eval,
-            f"resnet50_seed_{seed}"
-        )
+        results = evaluate(model, test, f"resnet_{seed}")
 
         all_results.append(results)
 
+
     # =========================
-    # FINAL RESULTS
+    # FINAL RESULT
     # =========================
-    print("\n===== FINAL RESULTS =====")
+    print("\n===== FINAL RESULT =====")
 
-    conditions = all_results[0].keys()
-    final_rows = []
+    keys = all_results[0].keys()
 
-    for c in conditions:
+    for k in keys:
 
-        accs = [r[c]["accuracy"] for r in all_results]
-        f1s = [r[c]["macro_f1"] for r in all_results]
+        accs = [r[k]["accuracy"] for r in all_results]
+        f1s = [r[k]["f1"] for r in all_results]
 
-        print(f"\n{c}")
+        print(f"\n{k}")
         print(f"Acc: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
         print(f"F1 : {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
-
-        final_rows.append({
-            "Condition": c,
-            "Accuracy Mean": np.mean(accs),
-            "Accuracy Std": np.std(accs),
-            "F1 Mean": np.mean(f1s),
-            "F1 Std": np.std(f1s)
-        })
-
-    os.makedirs("results", exist_ok=True)
-
-    pd.DataFrame(final_rows).to_csv(
-        "results/resnet50_final_results.csv",
-        index=False
-    )
-
-    print("\nSaved results.")
