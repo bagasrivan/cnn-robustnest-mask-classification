@@ -22,10 +22,10 @@ from preprocessing import load_data_generators
 
 
 # ======================================================
-# SPEED OPTIMIZATION
+# SPEED MODE (SAMAKAN DENGAN RESNET)
 # ======================================================
 tf.config.optimizer.set_jit(True)
-tf.keras.mixed_precision.set_global_policy("float32")
+tf.keras.mixed_precision.set_global_policy("mixed_float16")
 
 
 # ======================================================
@@ -39,7 +39,7 @@ def set_seed(seed):
 
 
 # ======================================================
-# MODEL BUILD + TRAIN
+# MODEL
 # ======================================================
 def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 
@@ -52,7 +52,7 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     )
 
     # =========================
-    # STAGE 1 (HEAD TRAINING FAST)
+    # STAGE 1 (FAST HEAD TRAINING)
     # =========================
     base_model.trainable = False
 
@@ -60,12 +60,14 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     x = Dense(128, activation='relu')(x)
     x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
-    outputs = Dense(3, activation='softmax')(x)
+
+    # penting untuk mixed precision
+    outputs = Dense(3, activation='softmax', dtype='float32')(x)
 
     model = Model(inputs=base_model.input, outputs=outputs)
 
     model.compile(
-        optimizer=Adam(learning_rate=1e-3),
+        optimizer=Adam(learning_rate=2e-3),   # lebih agresif biar cepat
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
@@ -91,27 +93,29 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     reduce_lr = ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.3,
-        patience=2
+        patience=2,
+        min_lr=1e-6
     )
 
-    print("\n--- Stage 1 Training (FAST) ---")
+    print("\n--- Stage 1 FAST TRAIN ---")
 
     model.fit(
         train_gen,
         validation_data=val_gen,
-        epochs=25, 
+        epochs=25,   
         callbacks=[early_stopping, reduce_lr, tensorboard],
         verbose=1
     )
 
     # =========================
-    # STAGE 2 (FINE TUNING LIGHT)
+    # STAGE 2 (LIGHT FINE-TUNING)
     # =========================
     print("\n--- Stage 2 Fine-tuning ---")
 
     base_model.trainable = True
 
-    for layer in base_model.layers[:60]:  
+    # lebih aman & stabil
+    for layer in base_model.layers[:60]:
         layer.trainable = False
 
     model.compile(
@@ -123,7 +127,7 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     os.makedirs("saved_models", exist_ok=True)
 
     checkpoint = ModelCheckpoint(
-        filepath=f'saved_models/best_{model_name}.h5',  
+        filepath=f'saved_models/best_{model_name}.keras',  # FIX FORMAT
         monitor='val_accuracy',
         save_best_only=True,
         mode='max'
@@ -133,7 +137,7 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
         train_gen,
         validation_data=val_gen,
         epochs=50,  
-        callbacks=[checkpoint, early_stopping, reduce_lr, tensorboard],
+        callbacks=[checkpoint, early_stopping, reduce_lr],
         verbose=1
     )
 
@@ -149,7 +153,7 @@ def evaluate_multiple_tests(model, test_generators, model_name):
 
     print(f"\n--- Evaluating {model_name} ---")
 
-    model.load_weights(f'saved_models/best_{model_name}.h5')
+    model.load_weights(f'saved_models/best_{model_name}.keras')
 
     results = {}
 
@@ -164,8 +168,6 @@ def evaluate_multiple_tests(model, test_generators, model_name):
 
     for name, gen in test_generators.items():
 
-        print(f"\n--- Testing: {name} ---")
-
         gen.reset()
 
         preds = model.predict(gen, verbose=0)
@@ -176,10 +178,7 @@ def evaluate_multiple_tests(model, test_generators, model_name):
         acc = model.evaluate(gen, verbose=0)[1]
         f1 = f1_score(gen.classes, y_pred, average='macro')
 
-        print(f"Accuracy: {acc:.4f}")
-        print(f"F1: {f1:.4f}")
-
-        print(classification_report(gen.classes, y_pred))
+        print(f"{name} | Acc: {acc:.4f} | F1: {f1:.4f}")
 
         if name in important_conditions:
 
@@ -187,7 +186,6 @@ def evaluate_multiple_tests(model, test_generators, model_name):
 
             plt.figure(figsize=(6,5))
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-
             plt.title(f"{name} - MobileNetV3")
             plt.xlabel("Pred")
             plt.ylabel("True")
@@ -220,7 +218,7 @@ if __name__ == "__main__":
 
         set_seed(seed)
 
-        train_gen, val_gen, test_eval, _ = load_data_generators()
+        train_gen, val_gen, test_eval, _ = load_data_generators(batch_size=64)  
 
         model, history = create_model_and_train_finetuning(
             train_gen,
@@ -233,6 +231,7 @@ if __name__ == "__main__":
         # =========================
         os.makedirs("plots", exist_ok=True)
 
+        plt.figure()
         plt.plot(history.history['accuracy'])
         plt.plot(history.history['val_accuracy'])
         plt.legend(['train','val'])
