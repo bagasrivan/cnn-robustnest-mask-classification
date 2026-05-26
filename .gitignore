@@ -1,0 +1,37 @@
+# Dataset
+Dataset/
+Dataset.zip
+
+# Models
+Models/
+saved_models/
+*.keras
+*.h5
+
+# Results
+Result/
+results/
+plots/
+confusion_matrices/
+visual_comparison/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+.venv/
+
+# MacOS
+.DS_Store
+
+# Experimental / temporary scripts
+save.py
+save2.py
+barchart.py
+ceklayer.py
+inferenceTimeMobileNetV3.py
+inferenceTimeResNet50.py
+testmodelmobilenetv3.py
+testmodelresnet50.py
