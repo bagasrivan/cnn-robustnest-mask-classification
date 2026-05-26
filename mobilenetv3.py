@@ -22,7 +22,7 @@ from preprocessing import load_data_generators
 
 
 # ======================================================
-# SPEED MODE (SAMAKAN DENGAN RESNET)
+# SPEED MODE 
 # ======================================================
 tf.config.optimizer.set_jit(True)
 tf.keras.mixed_precision.set_global_policy("mixed_float16")
@@ -52,7 +52,7 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     )
 
     # =========================
-    # STAGE 1 (FAST HEAD TRAINING)
+    # STAGE 1 (HEAD TRAINING)
     # =========================
     base_model.trainable = False
 
@@ -61,13 +61,12 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
 
-    # penting untuk mixed precision
     outputs = Dense(3, activation='softmax', dtype='float32')(x)
 
     model = Model(inputs=base_model.input, outputs=outputs)
 
     model.compile(
-        optimizer=Adam(learning_rate=2e-3),   # lebih agresif biar cepat
+        optimizer=Adam(learning_rate=2e-3),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
@@ -97,24 +96,23 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
         min_lr=1e-6
     )
 
-    print("\n--- Stage 1 FAST TRAIN ---")
+    print("\n--- Stage 1 Training Head ---")
 
     model.fit(
         train_gen,
         validation_data=val_gen,
-        epochs=25,   
+        epochs=25,
         callbacks=[early_stopping, reduce_lr, tensorboard],
         verbose=1
     )
 
     # =========================
-    # STAGE 2 (LIGHT FINE-TUNING)
+    # STAGE 2 (FINE TUNING)
     # =========================
     print("\n--- Stage 2 Fine-tuning ---")
 
     base_model.trainable = True
 
-    # lebih aman & stabil
     for layer in base_model.layers[:60]:
         layer.trainable = False
 
@@ -127,16 +125,17 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     os.makedirs("saved_models", exist_ok=True)
 
     checkpoint = ModelCheckpoint(
-        filepath=f'saved_models/best_{model_name}.keras',  # FIX FORMAT
+        filepath=f"saved_models/best_{model_name}.keras",
         monitor='val_accuracy',
         save_best_only=True,
-        mode='max'
+        mode='max',
+        verbose=1
     )
 
     history = model.fit(
         train_gen,
         validation_data=val_gen,
-        epochs=50,  
+        epochs=50,
         callbacks=[checkpoint, early_stopping, reduce_lr],
         verbose=1
     )
@@ -147,13 +146,13 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 
 
 # ======================================================
-# EVALUATION
+# EVALUATION 
 # ======================================================
 def evaluate_multiple_tests(model, test_generators, model_name):
 
     print(f"\n--- Evaluating {model_name} ---")
 
-    model.load_weights(f'saved_models/best_{model_name}.keras')
+    model.load_weights(f"saved_models/best_{model_name}.keras")
 
     results = {}
 
@@ -218,7 +217,7 @@ if __name__ == "__main__":
 
         set_seed(seed)
 
-        train_gen, val_gen, test_eval, _ = load_data_generators(batch_size=64)  
+        train_gen, val_gen, test_eval, _ = load_data_generators(batch_size=64)
 
         model, history = create_model_and_train_finetuning(
             train_gen,
