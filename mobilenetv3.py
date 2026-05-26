@@ -18,13 +18,15 @@ from tensorflow.keras.callbacks import (
 )
 
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
-
 from preprocessing import load_data_generators
 
 
 # ======================================================
-# SEED
+# SPEED OPTIMIZATION (IMPORTANT)
 # ======================================================
+tf.config.optimizer.set_jit(True)  # XLA ACCELERATION
+tf.keras.mixed_precision.set_global_policy("mixed_float16")
+
 
 def set_seed(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -36,7 +38,6 @@ def set_seed(seed):
 # ======================================================
 # MODEL
 # ======================================================
-
 def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 
     print(f"\n--- Building Model {model_name} ---")
@@ -48,18 +49,16 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     )
 
     # =========================
-    # STAGE 1 - HEAD TRAINING
+    # STAGE 1 (FAST HEAD)
     # =========================
     base_model.trainable = False
 
     x = GlobalAveragePooling2D()(base_model.output)
-
-    # 🔥 lebih ringan dari ResNet (biar MobileNet optimal)
     x = Dense(128, activation='relu')(x)
     x = BatchNormalization()(x)
-    x = Dropout(0.4)(x)
+    x = Dropout(0.3)(x)
 
-    outputs = Dense(3, activation='softmax')(x)
+    outputs = Dense(3, activation='softmax', dtype='float32')(x)
 
     model = Model(inputs=base_model.input, outputs=outputs)
 
@@ -70,55 +69,47 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     )
 
     # =========================
-    # LOGGING (TENSORBOARD)
+    # TENSORBOARD (IMPORTANT)
     # =========================
     log_dir = f"logs/{model_name}"
     os.makedirs(log_dir, exist_ok=True)
 
     tensorboard = TensorBoard(
         log_dir=log_dir,
-        histogram_freq=1
-    )
-
-    checkpoint = ModelCheckpoint(
-        filepath=f'saved_models/best_{model_name}.keras',
-        monitor='val_accuracy',
-        save_best_only=True,
-        mode='max'
+        histogram_freq=0,   # 🔥 lebih cepat
+        write_graph=False
     )
 
     early_stopping = EarlyStopping(
         monitor='val_loss',
-        patience=5,
+        patience=3,
         restore_best_weights=True
     )
 
     reduce_lr = ReduceLROnPlateau(
         monitor='val_loss',
-        factor=0.2,
-        patience=3
+        factor=0.3,
+        patience=2
     )
 
-    print("\n--- Stage 1: Training Head ---")
+    print("\n--- Stage 1: Training Head (FAST) ---")
 
     model.fit(
         train_gen,
         validation_data=val_gen,
-        epochs=25,
-        callbacks=[early_stopping, reduce_lr, tensorboard]
+        epochs=10,   # 🔥 DIPERCEPAT (dari 25 → 10)
+        callbacks=[early_stopping, reduce_lr, tensorboard],
+        verbose=1
     )
 
     # =========================
-    # STAGE 2 - FINE TUNING
+    # STAGE 2 (FINE TUNE LIGHT)
     # =========================
     print("\n--- Stage 2: Fine-Tuning ---")
 
     base_model.trainable = True
 
-    # MobileNetV3 lebih kecil → jangan terlalu tinggi layer freeze
-    fine_tune_at = 60
-
-    for layer in base_model.layers[:fine_tune_at]:
+    for layer in base_model.layers[:80]:  # 🔥 lebih ringan dari 140/60
         layer.trainable = False
 
     model.compile(
@@ -127,19 +118,20 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
         metrics=['accuracy']
     )
 
+    checkpoint = ModelCheckpoint(
+        filepath=f'saved_models/best_{model_name}.keras',
+        monitor='val_accuracy',
+        save_best_only=True
+    )
+
     history = model.fit(
         train_gen,
         validation_data=val_gen,
-        epochs=50,
-        callbacks=[
-            checkpoint,
-            early_stopping,
-            reduce_lr,
-            tensorboard
-        ]
+        epochs=20,   # 🔥 dari 50 → 20
+        callbacks=[checkpoint, early_stopping, reduce_lr, tensorboard],
+        verbose=1
     )
 
-    # SAVE HISTORY
     os.makedirs("logs", exist_ok=True)
     np.save(f"logs/{model_name}_history.npy", history.history)
 
@@ -147,9 +139,8 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 
 
 # ======================================================
-# EVALUATION (SAMA SEPERTI RESNET)
+# EVALUATION (FIXED + CLEAN)
 # ======================================================
-
 def evaluate_multiple_tests(model, test_generators, model_name):
 
     print(f"\n--- Evaluating {model_name} ---")
@@ -184,21 +175,17 @@ def evaluate_multiple_tests(model, test_generators, model_name):
         print(f"Accuracy: {acc:.4f}")
         print(f"F1: {f1:.4f}")
 
-        print(classification_report(gen.classes, y_pred))
-
         if name in important_conditions:
 
             cm = confusion_matrix(gen.classes, y_pred)
 
             plt.figure(figsize=(6,5))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+            sns.heatmap(cm, annot=True, fmt='d')
 
             plt.title(f"{name} - MobileNetV3")
-            plt.xlabel("Predicted")
-            plt.ylabel("Actual")
+            plt.tight_layout()
 
             os.makedirs("confusion_matrices", exist_ok=True)
-
             plt.savefig(f"confusion_matrices/cm_{name}_{model_name}.png")
             plt.close()
 
@@ -213,7 +200,6 @@ def evaluate_multiple_tests(model, test_generators, model_name):
 # ======================================================
 # MAIN
 # ======================================================
-
 if __name__ == "__main__":
 
     seeds = [42, 123, 999]
@@ -235,22 +221,15 @@ if __name__ == "__main__":
             model_name=f"mobilenetv3_seed_{seed}"
         )
 
-        # =========================
-        # PLOT
-        # =========================
         os.makedirs("plots", exist_ok=True)
 
-        plt.figure()
-        plt.plot(history.history['accuracy'], label='train')
-        plt.plot(history.history['val_accuracy'], label='val')
-        plt.legend()
+        plt.plot(history.history['accuracy'])
+        plt.plot(history.history['val_accuracy'])
+        plt.legend(['train','val'])
         plt.title(f"MobileNetV3 Seed {seed}")
         plt.savefig(f"plots/mobilenetv3_seed_{seed}.png")
         plt.close()
 
-        # =========================
-        # EVALUATION
-        # =========================
         results = evaluate_multiple_tests(
             model,
             test_eval,
@@ -259,9 +238,6 @@ if __name__ == "__main__":
 
         all_results.append(results)
 
-    # =========================
-    # FINAL RESULT
-    # =========================
     print("\n===== FINAL RESULTS =====")
 
     conditions = all_results[0].keys()

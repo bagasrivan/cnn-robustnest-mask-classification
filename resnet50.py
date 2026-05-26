@@ -6,6 +6,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam
@@ -18,14 +19,14 @@ from tensorflow.keras.callbacks import (
 )
 
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
-
 from preprocessing import load_data_generators
 
+mixed_precision.set_global_policy('mixed_float16')
+tf.config.optimizer.set_jit(True)
 
 # ======================================================
-# SEED SETUP (REPRODUCIBLE)
+# SEED
 # ======================================================
-
 def set_seed(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)
     random.seed(seed)
@@ -34,9 +35,8 @@ def set_seed(seed):
 
 
 # ======================================================
-# MODEL TRAINING
+# MODEL
 # ======================================================
-
 def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 
     print(f"\n--- Building Model {model_name} ---")
@@ -44,44 +44,37 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
     base_model = ResNet50(
         weights='imagenet',
         include_top=False,
-        input_shape=(224, 224, 3)
+        input_shape=(224, 224, 3),
+        pooling='avg'   # 🔥 FAST MODE
     )
 
     # =========================
-    # STAGE 1: TRAIN HEAD
+    # STAGE 1
     # =========================
     base_model.trainable = False
 
-    x = GlobalAveragePooling2D()(base_model.output)
+    x = base_model.output
     x = Dense(256, activation='relu')(x)
     x = BatchNormalization()(x)
     x = Dropout(0.5)(x)
-    outputs = Dense(3, activation='softmax')(x)
+
+    outputs = Dense(3, activation='softmax', dtype='float32')(x)
 
     model = Model(inputs=base_model.input, outputs=outputs)
 
     model.compile(
-        optimizer=Adam(learning_rate=1e-3),
+        optimizer=Adam(learning_rate=1e-3, clipnorm=1.0),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
 
-    # =========================
-    # LOGGING
-    # =========================
     log_dir = f"logs/{model_name}"
     os.makedirs(log_dir, exist_ok=True)
 
     tensorboard = TensorBoard(
         log_dir=log_dir,
-        histogram_freq=1
-    )
-
-    checkpoint = ModelCheckpoint(
-        filepath=f'saved_models/best_{model_name}.keras',
-        monitor='val_accuracy',
-        save_best_only=True,
-        mode='max'
+        histogram_freq=0,
+        update_freq='batch'
     )
 
     early_stopping = EarlyStopping(
@@ -96,20 +89,21 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
         patience=3
     )
 
-    print("\n--- Stage 1: Training Head ---")
+    print("\n--- Stage 1 Training ---")
 
     history1 = model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=25,
+        workers=4,
+        use_multiprocessing=True,
         callbacks=[early_stopping, reduce_lr, tensorboard]
     )
 
     # =========================
-    # STAGE 2: FINE TUNING
+    # STAGE 2
     # =========================
-
-    print("\n--- Stage 2: Fine-Tuning ---")
+    print("\n--- Stage 2 Fine-tuning ---")
 
     base_model.trainable = True
 
@@ -117,23 +111,28 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
         layer.trainable = False
 
     model.compile(
-        optimizer=Adam(learning_rate=1e-5),
+        optimizer=Adam(learning_rate=1e-5, clipnorm=1.0),
         loss='categorical_crossentropy',
         metrics=['accuracy']
+    )
+
+    os.makedirs('saved_models', exist_ok=True)
+
+    checkpoint = ModelCheckpoint(
+        filepath=f'saved_models/best_{model_name}.keras',
+        monitor='val_accuracy',
+        save_best_only=True,
+        mode='max'
     )
 
     history2 = model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=50,
+        workers=4,
+        use_multiprocessing=True,
         callbacks=[checkpoint, early_stopping, reduce_lr, tensorboard]
     )
-
-    # =========================
-    # SAVE HISTORY
-    # =========================
-    os.makedirs("logs", exist_ok=True)
-    np.save(f"logs/{model_name}_history.npy", history2.history)
 
     return model, history2
 
@@ -141,7 +140,6 @@ def create_model_and_train_finetuning(train_gen, val_gen, model_name):
 # ======================================================
 # EVALUATION
 # ======================================================
-
 def evaluate_multiple_tests(model, test_generators, model_name):
 
     print(f"\n--- Evaluating {model_name} ---")
@@ -175,9 +173,7 @@ def evaluate_multiple_tests(model, test_generators, model_name):
         f1 = f1_score(gen.classes, y_pred, average='macro')
 
         print(f"Accuracy: {acc:.4f}")
-        print(f"Macro F1: {f1:.4f}")
-
-        print(classification_report(gen.classes, y_pred))
+        print(f"F1 Score: {f1:.4f}")
 
         if name in important_conditions:
 
@@ -191,7 +187,6 @@ def evaluate_multiple_tests(model, test_generators, model_name):
             plt.ylabel("Actual")
 
             os.makedirs("confusion_matrices", exist_ok=True)
-
             plt.savefig(f"confusion_matrices/cm_{name}_{model_name}.png")
             plt.close()
 
@@ -204,9 +199,8 @@ def evaluate_multiple_tests(model, test_generators, model_name):
 
 
 # ======================================================
-# MAIN EXPERIMENT
+# MAIN
 # ======================================================
-
 if __name__ == "__main__":
 
     seeds = [42, 123, 999]
@@ -229,23 +223,20 @@ if __name__ == "__main__":
         )
 
         # =========================
-        # PLOT TRAINING
+        # PLOT
         # =========================
-
         os.makedirs("plots", exist_ok=True)
 
-        plt.figure()
         plt.plot(history.history['accuracy'], label='train')
         plt.plot(history.history['val_accuracy'], label='val')
         plt.legend()
-        plt.title(f"Accuracy Seed {seed}")
+        plt.title(f"Seed {seed}")
         plt.savefig(f"plots/acc_seed_{seed}.png")
         plt.close()
 
         # =========================
-        # EVALUATE
+        # EVAL
         # =========================
-
         results = evaluate_multiple_tests(
             model,
             test_eval,
@@ -255,9 +246,8 @@ if __name__ == "__main__":
         all_results.append(results)
 
     # ======================================================
-    # FINAL SUMMARY
+    # FINAL RESULT
     # ======================================================
-
     print("\n===== FINAL RESULTS =====")
 
     conditions = all_results[0].keys()
