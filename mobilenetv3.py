@@ -104,7 +104,7 @@ if __name__ == '__main__':
 
     for current_seed in SEEDS:
         print(f"\n========================================================")
-        print(f"🏃 RUNNING MOBILENETV3 EXPERIMENT - SEED {current_seed}")
+        print(f"RUNNING MOBILENETV3 EXPERIMENT - SEED {current_seed}")
         print(f"========================================================")
         
         set_system_seed(current_seed)
@@ -118,7 +118,7 @@ if __name__ == '__main__':
 
     # === RINGKASAN DATA AKHIR REPEATED RUN ===
     print("\n==========================================================")
-    print("📊 MOBILENETV3 REPEATED RUNS SUMMARY REPORT")
+    print("MOBILENETV3 REPEATED RUNS SUMMARY REPORT")
     print("==========================================================")
     print(f"{'Kondisi Eksperimen':<25} | {'Seed 42':<10} | {'Seed 123':<10} | {'Seed 999':<10} | {'Rata-rata':<10}")
     print("-" * 75)
