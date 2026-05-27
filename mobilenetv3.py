@@ -70,11 +70,11 @@ def evaluate_robustness_levels(model, seed_name):
     degradation_types = ['Brighten', 'Darken', 'Blur', 'Low Compression', 'Rotate']
     seed_results = {}
 
-    # 1. Evaluasi Data Uji Kondisi Normal
+    # 1. Evaluasi Data Uji Kondisi Normal (verbose=0 DIHAPUS dari flow_from_directory)
     test_datagen_normal = ImageDataGenerator(rescale=1./255)
     test_gen_normal = test_datagen_normal.flow_from_directory(
         os.path.join(DATASET_PATH, 'test'), target_size=(224, 224),
-        batch_size=1, class_mode='categorical', shuffle=False, verbose=0
+        batch_size=1, class_mode='categorical', shuffle=False
     )
     _, normal_acc = model.evaluate(test_gen_normal, verbose=0)
     seed_results['Normal_Level_0'] = normal_acc
@@ -87,7 +87,7 @@ def evaluate_robustness_levels(model, seed_name):
             test_datagen = ImageDataGenerator(rescale=1./255, preprocessing_function=test_preprocessing_function)
             test_gen = test_datagen.flow_from_directory(
                 os.path.join(DATASET_PATH, 'test'), target_size=(224, 224),
-                batch_size=1, class_mode='categorical', shuffle=False, verbose=0
+                batch_size=1, class_mode='categorical', shuffle=False
             )
             
             _, test_acc = model.evaluate(test_gen, verbose=0)
